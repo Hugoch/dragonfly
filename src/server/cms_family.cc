@@ -3,6 +3,7 @@
 //
 
 #include "core/cms.h"
+#include "error.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
 #include "facade/reply_builder.h"
@@ -112,8 +113,7 @@ void CmdInitByDim(CmdArgList args, CommandContext* cmd_cntx) {
 
   tie(width, depth) = parser.Next<uint32_t, uint32_t>();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  if (parser.HasError())
-    return rb->SendError(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, rb);
 
   if (width == 0 || depth == 0) {
     return rb->SendError("CMS: width and depth must be greater than 0");
@@ -140,8 +140,7 @@ void CmdInitByProb(CmdArgList args, CommandContext* cmd_cntx) {
 
   tie(error, probability) = parser.Next<double, double>();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  if (parser.HasError())
-    return rb->SendError(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, rb);
 
   if (error <= 0 || error >= 1) {
     return rb->SendError("CMS: error must be between 0 and 1 exclusive");
@@ -168,11 +167,9 @@ void CmdIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-
   // Parse item/increment pairs
   if (args.size() < 2 || args.size() % 2 != 0) {
-    return rb->SendError(kSyntaxErr);
+    return cmd_cntx->SendError(kSyntaxErr);
   }
 
   vector<pair<string_view, int64_t>> items;
@@ -182,7 +179,7 @@ void CmdIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
     string_view item = ToSV(args[i]);
     int64_t incr;
     if (!absl::SimpleAtoi(ToSV(args[i + 1]), &incr)) {
-      return rb->SendError(kCmsCannotParseNumber);
+      return cmd_cntx->SendError(kCmsCannotParseNumber);
     }
     items.emplace_back(item, incr);
   }
@@ -191,6 +188,7 @@ void CmdIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
     return OpIncrBy(t->GetOpArgs(shard), key, items);
   };
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   OpResult<vector<int64_t>> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (!res) {
     if (res.status() == OpStatus::KEY_NOTFOUND) {
@@ -199,6 +197,7 @@ void CmdIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError(res.status());
   }
 
+  SinkReplyBuilder::ReplyScope scope(rb);
   rb->StartArray(res->size());
   for (int64_t count : *res) {
     rb->SendLong(count);
@@ -209,16 +208,15 @@ void CmdQuery(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-
   if (args.empty()) {
-    return rb->SendError(kSyntaxErr);
+    return cmd_cntx->SendError(kSyntaxErr);
   }
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpQuery(t->GetOpArgs(shard), key, args);
   };
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   OpResult<vector<int64_t>> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (!res) {
     if (res.status() == OpStatus::KEY_NOTFOUND) {
@@ -227,6 +225,7 @@ void CmdQuery(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError(res.status());
   }
 
+  SinkReplyBuilder::ReplyScope scope(rb);
   rb->StartArray(res->size());
   for (int64_t count : *res) {
     rb->SendLong(count);
@@ -266,16 +265,15 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
 
   num_keys = parser.Next<uint32_t>();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  if (parser.HasError())
-    return rb->SendError(kSyntaxErr);
+  RETURN_ON_PARSE_ERROR(parser, rb);
 
   if (num_keys == 0) {
     return rb->SendError(kCmsWrongNumKeys);
   }
 
   // Check if we have enough arguments for keys
-  if (parser.RemainingArgs().size() < num_keys) {
-    return rb->SendError(kWrongArity);
+  if (parser.Tail().size() < num_keys) {
+    return rb->SendError(kSyntaxErr);
   }
 
   vector<string_view> src_keys;
@@ -286,7 +284,7 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Parse optional WEIGHTS
   vector<int64_t> weights;
-  if (!parser.Finished()) {
+  if (parser.HasNext()) {
     string_view weights_kw = parser.Next();
     if (!absl::EqualsIgnoreCase(weights_kw, "WEIGHTS")) {
       return rb->SendError(kSyntaxErr);
@@ -294,7 +292,7 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
 
     weights.reserve(num_keys);
     for (uint32_t i = 0; i < num_keys; ++i) {
-      if (parser.Finished()) {
+      if (!parser.HasNext()) {
         return rb->SendError(kCmsWrongNumKeysWeights);
       }
       int64_t w;
@@ -305,7 +303,7 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
     }
   }
 
-  if (!parser.Finished()) {
+  if (parser.HasNext()) {
     return rb->SendError(kCmsWrongNumKeysWeights);
   }
 
@@ -317,7 +315,7 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
   // Multi-key operation - we need to read from source keys and write to dest
   // For simplicity, we'll use a global transaction
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpStatus {
-    auto& db_slice = shard->db_slice();
+    auto& db_slice = t->GetOpArgs(shard).GetDbSlice();
     const DbContext& db_cntx = t->GetDbContext();
 
     // Find destination
@@ -368,14 +366,14 @@ void RegisterCmsFamily(CommandRegistry* registry) {
   registry->StartFamily();
 
   *registry
-      << CI{"CMS.INITBYDIM", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, acl::BLOOM}.HFUNC(
+      << CI{"CMS.INITBYDIM", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1, acl::BLOOM}.HFUNC(
              InitByDim)
-      << CI{"CMS.INITBYPROB", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, acl::BLOOM}.HFUNC(
+      << CI{"CMS.INITBYPROB", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1, acl::BLOOM}.HFUNC(
              InitByProb)
-      << CI{"CMS.INCRBY", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::BLOOM}.HFUNC(IncrBy)
+      << CI{"CMS.INCRBY", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::BLOOM}.HFUNC(IncrBy)
       << CI{"CMS.QUERY", CO::READONLY | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(Query)
       << CI{"CMS.INFO", CO::READONLY | CO::FAST, 2, 1, 1, acl::BLOOM}.HFUNC(Info)
-      << CI{"CMS.MERGE", CO::WRITE | CO::DENYOOM | CO::VARIADIC_KEYS, -4, 1, 1, acl::BLOOM}.HFUNC(
+      << CI{"CMS.MERGE", CO::JOURNALED | CO::DENYOOM | CO::VARIADIC_KEYS, -4, 1, 1, acl::BLOOM}.HFUNC(
              Merge);
 }
 

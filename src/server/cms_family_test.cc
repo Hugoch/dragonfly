@@ -49,7 +49,7 @@ TEST_F(CmsFamilyTest, IncrBy) {
   Run({"cms.initbydim", "cms", "100", "5"});
 
   auto resp = Run({"cms.incrby", "cms", "foo", "3"});
-  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(3))));
+  EXPECT_THAT(resp, IntArg(3)); // single-element array are collapsed
 
   resp = Run({"cms.incrby", "cms", "foo", "4", "bar", "1"});
   EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(7), IntArg(1))));
@@ -68,13 +68,13 @@ TEST_F(CmsFamilyTest, Query) {
   Run({"cms.incrby", "cms", "foo", "5", "bar", "3"});
 
   auto resp = Run({"cms.query", "cms", "foo"});
-  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(5))));
+  EXPECT_THAT(resp, IntArg(5));  // single-element array are collapsed
 
   resp = Run({"cms.query", "cms", "foo", "bar"});
   EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(5), IntArg(3))));
 
   resp = Run({"cms.query", "cms", "noexist"});
-  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(0))));
+  EXPECT_THAT(resp, IntArg(0));
 
   // Should fail on non-existent key
   resp = Run({"cms.query", "noexist", "foo"});
