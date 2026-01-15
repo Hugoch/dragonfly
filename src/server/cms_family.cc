@@ -312,23 +312,31 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
     weights.resize(num_keys, 1);
   }
 
-  // Multi-key operation - we need to read from source keys and write to dest
-  // For simplicity, we'll use a global transaction
+  // For CMS.MERGE, we need to check that all keys exist and have matching dimensions
+  // Then merge source CMS into destination
+  // This requires coordination across shards if keys are distributed
+
+  // For now, use a simple approach: read sources, then merge into destination
+  // This works when keys are on same shard (ScheduleSingleHop will fail if not)
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpStatus {
     auto& db_slice = t->GetOpArgs(shard).GetDbSlice();
     const DbContext& db_cntx = t->GetDbContext();
 
     // Find destination
+    LOG(ERROR) << "Find destination";
     OpResult dest_res = db_slice.FindMutable(db_cntx, dest_key, OBJ_CMS);
     if (!dest_res) {
+      LOG(ERROR) << "Destination does not exist";
       return dest_res.status();
     }
     CMS* dest_cms = dest_res->it->second.GetCMS();
 
     // Read all source CMS and merge
     for (size_t i = 0; i < src_keys.size(); ++i) {
+      LOG(ERROR) << "Find source";
       OpResult src_res = db_slice.FindReadOnly(db_cntx, src_keys[i], OBJ_CMS);
       if (!src_res) {
+        LOG(ERROR) << "Source does not exist" << " " << src_keys[i];
         return src_res.status();
       }
       const CMS* src_cms = src_res.value()->second.GetCMS();
@@ -341,8 +349,6 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  // All keys need to be on the same shard for this simple implementation
-  // In production, you'd want to handle this differently for multi-shard cases
   OpStatus res = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   if (res == OpStatus::KEY_NOTFOUND) {
     return rb->SendError(kCmsNotFound);
@@ -373,8 +379,7 @@ void RegisterCmsFamily(CommandRegistry* registry) {
       << CI{"CMS.INCRBY", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::BLOOM}.HFUNC(IncrBy)
       << CI{"CMS.QUERY", CO::READONLY | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(Query)
       << CI{"CMS.INFO", CO::READONLY | CO::FAST, 2, 1, 1, acl::BLOOM}.HFUNC(Info)
-      << CI{"CMS.MERGE", CO::JOURNALED | CO::DENYOOM | CO::VARIADIC_KEYS, -4, 1, 1, acl::BLOOM}.HFUNC(
-             Merge);
+      << CI{"CMS.MERGE", CO::JOURNALED | CO::DENYOOM, -4, 1, 1, acl::BLOOM}.HFUNC(Merge);
 }
 
 }  // namespace dfly

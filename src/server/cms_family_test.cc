@@ -100,21 +100,21 @@ TEST_F(CmsFamilyTest, Merge) {
   Run({"cms.initbydim", "C", "100", "5"});
 
   Run({"cms.incrby", "A", "foo", "5", "bar", "3", "baz", "9"});
-  Run({"cms.incrby", "B", "foo", "2", "bar", "3", "baz", "1"});
+  Run({"cms.incrby", "B", "foo", "2", "foobar", "3", "baz", "1"});
 
   // Verify initial values
   auto resp = Run({"cms.query", "A", "foo", "bar", "baz"});
   EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(5), IntArg(3), IntArg(9))));
 
-  resp = Run({"cms.query", "B", "foo", "bar", "baz"});
+  resp = Run({"cms.query", "B", "foo", "foobar", "baz"});
   EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(2), IntArg(3), IntArg(1))));
 
   // Merge A and B into C
   resp = Run({"cms.merge", "C", "2", "A", "B"});
   EXPECT_EQ(resp, "OK");
 
-  resp = Run({"cms.query", "C", "foo", "bar", "baz"});
-  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(7), IntArg(6), IntArg(10))));
+  resp = Run({"cms.query", "C", "foo", "bar", "baz", "foobar"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(7), IntArg(3), IntArg(10), IntArg(3))));
 
   // Should fail on non-existent destination
   resp = Run({"cms.merge", "noexist", "1", "A"});
