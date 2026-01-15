@@ -3,6 +3,8 @@
 //
 
 #include "core/cms.h"
+
+#include "absl/container/flat_hash_map.h"
 #include "error.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
@@ -258,6 +260,18 @@ void CmdInfo(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendLong(res->count);
 }
 
+// Structure to hold CMS data collected from a shard
+struct CmsShardData {
+  string_view key;      // Original key name
+  uint32_t width;
+  uint32_t depth;
+  int64_t count;
+  vector<int64_t> counters;  // Copy of raw counter data
+
+  CmsShardData(string_view k, uint32_t w, uint32_t d, int64_t c, const int64_t* data, size_t size)
+      : key(k), width(w), depth(d), count(c), counters(data, data + size) {}
+};
+
 void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser(args);
   string_view dest_key = parser.Next();
@@ -312,54 +326,136 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
     weights.resize(num_keys, 1);
   }
 
-  // For CMS.MERGE, we need to check that all keys exist and have matching dimensions
-  // Then merge source CMS into destination
-  // This requires coordination across shards if keys are distributed
+  // Multi-shard implementation: read from all shards, merge in coordinator, write to dest
+  Transaction* tx = cmd_cntx->tx();
 
-  // For now, use a simple approach: read sources, then merge into destination
-  // This works when keys are on same shard (ScheduleSingleHop will fail if not)
-  auto cb = [&](Transaction* t, EngineShard* shard) -> OpStatus {
+  // Phase 1: Read CMS data from all shards
+  vector<OpResult<vector<CmsShardData>>> shard_results(shard_set->size(), OpStatus::SKIPPED);
+
+  auto read_cb = [&](Transaction* t, EngineShard* shard) -> OpStatus {
     auto& db_slice = t->GetOpArgs(shard).GetDbSlice();
     const DbContext& db_cntx = t->GetDbContext();
+    vector<CmsShardData> cms_list;
 
-    // Find destination
-    LOG(ERROR) << "Find destination";
-    OpResult dest_res = db_slice.FindMutable(db_cntx, dest_key, OBJ_CMS);
-    if (!dest_res) {
-      LOG(ERROR) << "Destination does not exist";
-      return dest_res.status();
+    // Check each source key to see if it belongs to this shard
+    for (string_view key : src_keys) {
+      ShardId key_shard = Shard(key, shard_set->size());
+      if (key_shard != shard->shard_id()) {
+        continue;  // Key belongs to a different shard
+      }
+
+      OpResult src_res = db_slice.FindReadOnly(db_cntx, key, OBJ_CMS);
+      if (!src_res) {
+        // Store error and continue - don't return error from callback
+        shard_results[shard->shard_id()] = src_res.status();
+        return OpStatus::OK;  // Always return OK from callbacks
+      }
+
+      const CMS* cms = src_res.value()->second.GetCMS();
+      size_t counter_count = cms->CounterBytes() / sizeof(int64_t);
+      cms_list.emplace_back(key, cms->Width(), cms->Depth(), cms->Count(),
+                           cms->Data(), counter_count);
     }
+
+    if (!cms_list.empty()) {
+      shard_results[shard->shard_id()] = std::move(cms_list);
+    }
+    return OpStatus::OK;
+  };
+
+  tx->Execute(read_cb, false);  // false = don't conclude yet
+
+  // Phase 2: Validate dimensions and collect all CMS data
+  vector<CmsShardData*> all_cms_data;
+  uint32_t ref_width = 0, ref_depth = 0;
+
+  // Build a map from key name to original index for weight lookup
+  absl::flat_hash_map<string_view, size_t> key_to_index;
+  for (size_t i = 0; i < src_keys.size(); ++i) {
+    key_to_index[src_keys[i]] = i;
+  }
+
+  // Check for errors and collect data
+  for (auto& result : shard_results) {
+    if (result.status() == OpStatus::SKIPPED)
+      continue;
+
+    if (!result) {
+      tx->Conclude();
+      if (result.status() == OpStatus::KEY_NOTFOUND) {
+        return rb->SendError(kCmsNotFound);
+      }
+      return rb->SendError(result.status());
+    }
+
+    for (auto& cms_data : result.value()) {
+      if (all_cms_data.empty()) {
+        ref_width = cms_data.width;
+        ref_depth = cms_data.depth;
+      } else if (cms_data.width != ref_width || cms_data.depth != ref_depth) {
+        tx->Conclude();
+        return rb->SendError("CMS: dimension mismatch");
+      }
+      all_cms_data.push_back(&cms_data);
+    }
+  }
+
+  if (all_cms_data.empty()) {
+    tx->Conclude();
+    return rb->SendError(kCmsNotFound);
+  }
+
+  // Phase 3: Write merged data to destination shard
+  ShardId dest_shard_id = Shard(dest_key, shard_set->size());
+  OpStatus write_result = OpStatus::OK;
+
+  auto write_cb = [&](Transaction* t, EngineShard* shard) -> OpStatus {
+    if (shard->shard_id() != dest_shard_id) {
+      return OpStatus::OK;  // Only write on dest shard
+    }
+
+    auto& db_slice = t->GetOpArgs(shard).GetDbSlice();
+    OpResult dest_res = db_slice.FindMutable(t->GetDbContext(), dest_key, OBJ_CMS);
+    if (!dest_res) {
+      write_result = dest_res.status();
+      return OpStatus::OK;  // Always return OK from callback
+    }
+
     CMS* dest_cms = dest_res->it->second.GetCMS();
 
-    // Read all source CMS and merge
-    for (size_t i = 0; i < src_keys.size(); ++i) {
-      LOG(ERROR) << "Find source";
-      OpResult src_res = db_slice.FindReadOnly(db_cntx, src_keys[i], OBJ_CMS);
-      if (!src_res) {
-        LOG(ERROR) << "Source does not exist" << " " << src_keys[i];
-        return src_res.status();
-      }
-      const CMS* src_cms = src_res.value()->second.GetCMS();
+    // Validate destination dimensions
+    if (ref_width != dest_cms->Width() || ref_depth != dest_cms->Depth()) {
+      write_result = OpStatus::INVALID_VALUE;
+      return OpStatus::OK;  // Always return OK from callback
+    }
 
-      if (!dest_cms->MergeFrom(*src_cms, weights[i])) {
-        return OpStatus::INVALID_VALUE;  // Dimension mismatch
+    // Merge each source into destination
+    for (CmsShardData* cms_data : all_cms_data) {
+      // Create temporary CMS from counter data
+      CMS temp_cms(cms_data->width, cms_data->depth, CompactObj::memory_resource());
+      temp_cms.SetCounters(cms_data->counters.data(), cms_data->counters.size(),
+                          cms_data->count);
+
+      // Look up the correct weight for this key
+      size_t key_idx = key_to_index[cms_data->key];
+      if (!dest_cms->MergeFrom(temp_cms, weights[key_idx])) {
+        write_result = OpStatus::INVALID_VALUE;
+        return OpStatus::OK;  // Always return OK from callback
       }
     }
 
     return OpStatus::OK;
   };
 
-  OpStatus res = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
-  if (res == OpStatus::KEY_NOTFOUND) {
+  tx->Execute(write_cb, true);  // true = conclude transaction
+
+  if (write_result == OpStatus::KEY_NOTFOUND) {
     return rb->SendError(kCmsNotFound);
   }
-  if (res == OpStatus::INVALID_VALUE) {
+  if (write_result == OpStatus::INVALID_VALUE) {
     return rb->SendError("CMS: dimension mismatch");
   }
-  if (res == OpStatus::OK) {
-    return rb->SendOk();
-  }
-  return rb->SendError(res);
+  return rb->SendOk();
 }
 
 }  // namespace
@@ -379,7 +475,7 @@ void RegisterCmsFamily(CommandRegistry* registry) {
       << CI{"CMS.INCRBY", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::BLOOM}.HFUNC(IncrBy)
       << CI{"CMS.QUERY", CO::READONLY | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(Query)
       << CI{"CMS.INFO", CO::READONLY | CO::FAST, 2, 1, 1, acl::BLOOM}.HFUNC(Info)
-      << CI{"CMS.MERGE", CO::JOURNALED | CO::DENYOOM, -4, 1, 1, acl::BLOOM}.HFUNC(Merge);
+      << CI{"CMS.MERGE", CO::JOURNALED | CO::DENYOOM | CO::VARIADIC_KEYS, -4, 3, 3, acl::BLOOM}.HFUNC(Merge);
 }
 
 }  // namespace dfly
