@@ -49,7 +49,7 @@ endif()
 
 # Optionally compile extension commands
 if (WITH_EXTENSION_CMDS)
-  list(APPEND DF_FAMILY_SRCS geo_family.cc hll_family.cc bitops_family.cc bloom_family.cc cms_family.cc json_family.cc)
+  list(APPEND DF_FAMILY_SRCS geo_family.cc hll_family.cc bitops_family.cc bloom_family.cc cms_family.cc topk_family.cc json_family.cc)
   add_definitions(-DWITH_EXTENSION_CMDS)
 endif()
 

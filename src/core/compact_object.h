@@ -27,6 +27,7 @@ constexpr unsigned kEncodingJsonFlat = 1;
 
 class SBF;
 class CMS;
+class TOPK;
 class PageUsage;
 
 using cmn::StringOrView;
@@ -127,6 +128,7 @@ class CompactObj {
     JSON_TAG = 21,
     SBF_TAG = 22,
     CMS_TAG = 23,
+    TOPK_TAG = 24,
   };
 
   // String encoding types.
@@ -324,6 +326,14 @@ class CompactObj {
   void SetCMS(uint32_t width, uint32_t depth);
   CMS* GetCMS() const;
 
+  void SetTOPK(TOPK* topk) {
+    SetMeta(TOPK_TAG);
+    u_.topk = topk;
+  }
+
+  void SetTOPK(uint32_t k, uint32_t width, uint32_t depth, double decay);
+  TOPK* GetTOPK() const;
+
   // dest must have at least Size() bytes available
   void GetString(char* dest) const;
 
@@ -508,6 +518,7 @@ class CompactObj {
     JsonWrapper json_obj __attribute__((packed));
     SBF* sbf __attribute__((packed));
     CMS* cms __attribute__((packed));
+    TOPK* topk __attribute__((packed));
     int64_t ival __attribute__((packed));
     ExternalPtr ext_ptr;
 
