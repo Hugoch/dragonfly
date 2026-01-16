@@ -45,8 +45,7 @@ TOPK::TOPK(TOPK&& other) noexcept
       decay_lookup_(other.decay_lookup_),
       counters_(std::move(other.counters_)),
       min_heap_(std::move(other.min_heap_)),
-      item_to_hash_(std::move(other.item_to_hash_)),
-      heap_index_(std::move(other.heap_index_)) {
+      item_to_hash_(std::move(other.item_to_hash_)) {
 }
 
 TOPK& TOPK::operator=(TOPK&& other) noexcept {
@@ -59,7 +58,6 @@ TOPK& TOPK::operator=(TOPK&& other) noexcept {
     counters_ = std::move(other.counters_);
     min_heap_ = std::move(other.min_heap_);
     item_to_hash_ = std::move(other.item_to_hash_);
-    heap_index_ = std::move(other.heap_index_);
   }
   return *this;
 }
@@ -109,12 +107,8 @@ void TOPK::HeapifyUp(size_t index) {
       break;  // Heap property satisfied
     }
 
-    // Swap with parent
+    // Swap with parent - no index map updates for better cache performance
     std::swap(min_heap_[parent], min_heap_[index]);
-
-    // Update index map to reflect new positions
-    heap_index_[min_heap_[parent].key] = parent;
-    heap_index_[min_heap_[index].key] = index;
 
     index = parent;
   }
@@ -141,12 +135,8 @@ void TOPK::HeapifyDown(size_t index) {
       break;  // Heap property satisfied
     }
 
-    // Swap with smallest child
+    // Swap with smallest child - no index map updates for better cache performance
     std::swap(min_heap_[smallest], min_heap_[index]);
-
-    // Update index map to reflect new positions
-    heap_index_[min_heap_[smallest].key] = smallest;
-    heap_index_[min_heap_[index].key] = index;
 
     index = smallest;
   }
@@ -291,22 +281,27 @@ void TOPK::UpdateHeap(std::string_view item, uint32_t new_count) {
   std::string item_str(item);
   size_t item_hash = XXH3_64bits(item.data(), item.size());
 
-  // Check if item is already in heap using O(1) index lookup
-  auto idx_it = heap_index_.find(item_str);
-  if (idx_it != heap_index_.end()) {
-    // Item is in heap - update count and restore heap property with O(log k) heapify
-    size_t idx = idx_it->second;
-    uint32_t old_count = min_heap_[idx].count;
-    min_heap_[idx].count = new_count;
+  // First check if item is in top-k using O(1) hash lookup
+  auto it = item_to_hash_.find(item_str);
+  if (it != item_to_hash_.end()) {
+    // Item is in top-k, find its position in heap with O(k) linear search
+    // This is acceptable since we only do it for items we KNOW are in the heap
+    for (size_t i = 0; i < min_heap_.size(); ++i) {
+      if (min_heap_[i].key == item_str) {
+        // Update count and restore heap property with O(log k) heapify
+        uint32_t old_count = min_heap_[i].count;
+        min_heap_[i].count = new_count;
 
-    // Restore heap property based on count change
-    if (new_count > old_count) {
-      HeapifyUp(idx);  // Count increased, may need to move up
-    } else if (new_count < old_count) {
-      HeapifyDown(idx);  // Count decreased, may need to move down
+        // Restore heap property based on count change
+        if (new_count > old_count) {
+          HeapifyUp(i);  // Count increased, may need to move up
+        } else if (new_count < old_count) {
+          HeapifyDown(i);  // Count decreased, may need to move down
+        }
+        // If counts equal, no heapify needed
+        return;
+      }
     }
-    // If counts equal, no heapify needed
-    return;
   }
 
   // Item not in heap - add if heap not full or count > min
@@ -315,17 +310,14 @@ void TOPK::UpdateHeap(std::string_view item, uint32_t new_count) {
     size_t new_idx = min_heap_.size();
     min_heap_.push_back({item_str, new_count, item_hash});
     item_to_hash_[item_str] = item_hash;
-    heap_index_[item_str] = new_idx;
     HeapifyUp(new_idx);  // Restore heap property
   } else if (new_count > min_heap_.front().count) {
     // Count is higher than minimum in heap, replace minimum
     std::string old_key = min_heap_[0].key;
     item_to_hash_.erase(old_key);
-    heap_index_.erase(old_key);
 
     min_heap_[0] = {item_str, new_count, item_hash};
     item_to_hash_[item_str] = item_hash;
-    heap_index_[item_str] = 0;
     HeapifyDown(0);  // Restore heap property from root
   }
 }
@@ -335,19 +327,22 @@ std::string TOPK::TryExpelMin() {
     return "";
   }
 
-  auto min_item = min_heap_.front();
-  std::pop_heap(min_heap_.begin(), min_heap_.end(), std::greater<HeapItem>());
-  min_heap_.pop_back();
-  item_to_hash_.erase(min_item.key);
-  heap_index_.erase(min_item.key);
+  // Remove minimum item (at root)
+  std::string min_key = min_heap_[0].key;
+  item_to_hash_.erase(min_key);
 
-  // After pop_heap + pop_back, heap positions may have changed
-  // Rebuild heap_index_ for all remaining items
-  for (size_t i = 0; i < min_heap_.size(); ++i) {
-    heap_index_[min_heap_[i].key] = i;
+  // Move last item to root and heapify down
+  if (min_heap_.size() > 1) {
+    min_heap_[0] = min_heap_.back();
+  }
+  min_heap_.pop_back();
+
+  // Restore heap property from root (only if we moved an item)
+  if (!min_heap_.empty()) {
+    HeapifyDown(0);
   }
 
-  return min_item.key;
+  return min_key;
 }
 
 size_t TOPK::MallocUsed() const {
@@ -387,7 +382,6 @@ void TOPK::Deserialize(const SerializedData& data) {
   // Clear existing data
   min_heap_.clear();
   item_to_hash_.clear();
-  heap_index_.clear();
 
   // Restore counters
   counters_.assign(data.counters.begin(), data.counters.end());
@@ -401,12 +395,6 @@ void TOPK::Deserialize(const SerializedData& data) {
 
   // Rebuild heap property
   std::make_heap(min_heap_.begin(), min_heap_.end(), std::greater<HeapItem>());
-
-  // Rebuild heap index after make_heap (positions have changed)
-  // This is critical: make_heap() reorganizes elements, so we must rebuild the index
-  for (size_t i = 0; i < min_heap_.size(); ++i) {
-    heap_index_[min_heap_[i].key] = i;
-  }
 }
 
 }  // namespace dfly

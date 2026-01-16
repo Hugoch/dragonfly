@@ -171,10 +171,6 @@ class TOPK {
 
   // Fast lookup: item name -> hash for O(1) "is in top-k" queries
   absl::flat_hash_map<std::string, size_t> item_to_hash_;
-
-  // Heap index map: item name -> index in min_heap_ for O(1) position lookup
-  // This enables O(log k) targeted heapify operations instead of O(k) full rebuilds
-  absl::flat_hash_map<std::string, size_t> heap_index_;
 };
 
 }  // namespace dfly
