@@ -490,15 +490,18 @@ void TopkFamily::Info(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Build array response: [k, <k>, width, <width>, depth, <depth>, decay, <decay>]
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  rb->StartArray(8);
-  rb->SendBulkString("k");
-  rb->SendLong(result->k);
-  rb->SendBulkString("width");
-  rb->SendLong(result->width);
-  rb->SendBulkString("depth");
-  rb->SendLong(result->depth);
-  rb->SendBulkString("decay");
-  rb->SendDouble(result->decay);
+  {
+    SinkReplyBuilder::ReplyScope scope(rb);
+    rb->StartArray(8);
+    rb->SendBulkString("k");
+    rb->SendLong(result->k);
+    rb->SendBulkString("width");
+    rb->SendLong(result->width);
+    rb->SendBulkString("depth");
+    rb->SendLong(result->depth);
+    rb->SendBulkString("decay");
+    rb->SendDouble(result->decay);
+  }
 }
 
 using CI = CommandId;

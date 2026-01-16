@@ -251,13 +251,16 @@ void CmdInfo(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError(res.status());
   }
 
-  rb->StartArray(6);
-  rb->SendBulkString("width");
-  rb->SendLong(res->width);
-  rb->SendBulkString("depth");
-  rb->SendLong(res->depth);
-  rb->SendBulkString("count");
-  rb->SendLong(res->count);
+  {
+    SinkReplyBuilder::ReplyScope scope(rb);
+    rb->StartArray(6);
+    rb->SendBulkString("width");
+    rb->SendLong(res->width);
+    rb->SendBulkString("depth");
+    rb->SendLong(res->depth);
+    rb->SendBulkString("count");
+    rb->SendLong(res->count);
+  }
 }
 
 // Structure to hold CMS data collected from a shard
