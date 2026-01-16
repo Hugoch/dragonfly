@@ -4,6 +4,7 @@
 
 #include "server/topk_family.h"
 
+#include "base/cycle_clock.h"
 #include "base/logging.h"
 #include "core/topk.h"
 #include "error.h"
@@ -70,6 +71,8 @@ OpResult<vector<optional<string>>> OpAdd(const OpArgs& op_args, string_view key,
 // Op function for TOPK.INCRBY
 OpResult<vector<optional<string>>> OpIncrBy(const OpArgs& op_args, string_view key,
                                              const vector<pair<string_view, uint32_t>>& items) {
+  uint64_t op_start = base::CycleClock::Now();
+
   auto& db_slice = op_args.GetDbSlice();
   OpResult op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_TOPK);
   if (!op_res)
@@ -79,6 +82,7 @@ OpResult<vector<optional<string>>> OpIncrBy(const OpArgs& op_args, string_view k
   vector<optional<string>> result;
   result.reserve(items.size());
 
+  uint64_t topk_start = base::CycleClock::Now();
   for (const auto& [item, incr] : items) {
     auto expelled = topk->IncrBy(item, incr);
     if (expelled.empty()) {
@@ -87,6 +91,11 @@ OpResult<vector<optional<string>>> OpIncrBy(const OpArgs& op_args, string_view k
       result.push_back(expelled[0]);
     }
   }
+  uint64_t topk_time = base::CycleClock::ToUsec(base::CycleClock::Now() - topk_start);
+  uint64_t total_op_time = base::CycleClock::ToUsec(base::CycleClock::Now() - op_start);
+
+  VLOG(1) << "  OpIncrBy[" << items.size() << " items]: topk_ops=" << topk_time
+          << "us total_op=" << total_op_time << "us";
 
   return result;
 }
@@ -235,18 +244,23 @@ void TopkFamily::Add(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Build array response
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  rb->StartArray(result->size());
-  for (const auto& expelled : *result) {
-    if (expelled.has_value()) {
-      rb->SendBulkString(*expelled);
-    } else {
-      rb->SendNull();
+  {
+    SinkReplyBuilder::ReplyScope scope(rb);
+    rb->StartArray(result->size());
+    for (const auto& expelled : *result) {
+      if (expelled.has_value()) {
+        rb->SendBulkString(*expelled);
+      } else {
+        rb->SendNull();
+      }
     }
   }
 }
 
 // TOPK.INCRBY key item increment [item increment ...]
 void TopkFamily::IncrBy(CmdArgList args, CommandContext* cmd_cntx) {
+  uint64_t cmd_start = base::CycleClock::Now();
+
   CmdArgParser parser(args);
   string_view key = parser.Next();
 
@@ -270,11 +284,15 @@ void TopkFamily::IncrBy(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
+  uint64_t parse_time = base::CycleClock::ToUsec(base::CycleClock::Now() - cmd_start);
+
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpIncrBy(t->GetOpArgs(shard), key, items);
   };
 
   auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+
+  uint64_t shard_time = base::CycleClock::ToUsec(base::CycleClock::Now() - cmd_start);
 
   if (result.status() == OpStatus::KEY_NOTFOUND) {
     return cmd_cntx->SendError(kKeyNotFoundErr);
@@ -285,15 +303,25 @@ void TopkFamily::IncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   // Build array response
+  uint64_t ser_start = base::CycleClock::Now();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  rb->StartArray(result->size());
-  for (const auto& expelled : *result) {
-    if (expelled.has_value()) {
-      rb->SendBulkString(*expelled);
-    } else {
-      rb->SendNull();
+  {
+    SinkReplyBuilder::ReplyScope scope(rb);
+    rb->StartArray(result->size());
+    for (const auto& expelled : *result) {
+      if (expelled.has_value()) {
+        rb->SendBulkString(*expelled);
+      } else {
+        rb->SendNull();
+      }
     }
   }
+  uint64_t ser_time = base::CycleClock::ToUsec(base::CycleClock::Now() - ser_start);
+  uint64_t total_time = base::CycleClock::ToUsec(base::CycleClock::Now() - cmd_start);
+
+  VLOG(1) << "TOPK.INCRBY[" << items.size() << " items]: parse=" << parse_time << "us shard="
+          << (shard_time - parse_time) << "us serialize=" << ser_time << "us total=" << total_time
+          << "us";
 }
 
 // TOPK.QUERY key item [item ...]
@@ -326,9 +354,12 @@ void TopkFamily::Query(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Build array response
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  rb->StartArray(result->size());
-  for (int present : *result) {
-    rb->SendLong(present);
+  {
+    SinkReplyBuilder::ReplyScope scope(rb);
+    rb->StartArray(result->size());
+    for (int present : *result) {
+      rb->SendLong(present);
+    }
   }
 }
 
@@ -362,14 +393,19 @@ void TopkFamily::Count(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Build array response
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  rb->StartArray(result->size());
-  for (uint32_t count : *result) {
-    rb->SendLong(count);
+  {
+    SinkReplyBuilder::ReplyScope scope(rb);
+    rb->StartArray(result->size());
+    for (uint32_t count : *result) {
+      rb->SendLong(count);
+    }
   }
 }
 
 // TOPK.LIST key [WITHCOUNT]
 void TopkFamily::List(CmdArgList args, CommandContext* cmd_cntx) {
+  uint64_t cmd_start = base::CycleClock::Now();
+
   CmdArgParser parser(args);
   string_view key = parser.Next();
 
@@ -383,11 +419,15 @@ void TopkFamily::List(CmdArgList args, CommandContext* cmd_cntx) {
     }
   }
 
+  uint64_t parse_time = base::CycleClock::ToUsec(base::CycleClock::Now() - cmd_start);
+
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpList(t->GetOpArgs(shard), key);
   };
 
   auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+
+  uint64_t shard_time = base::CycleClock::ToUsec(base::CycleClock::Now() - cmd_start);
 
   if (result.status() == OpStatus::KEY_NOTFOUND) {
     return cmd_cntx->SendError(kKeyNotFoundErr);
@@ -398,22 +438,35 @@ void TopkFamily::List(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   // Build array response
+  uint64_t ser_start = base::CycleClock::Now();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  if (with_count) {
-    // Flat array: [item1, count1, item2, count2, ...]
-    rb->StartArray(result->size() * 2);
-    for (const auto& topk_item : *result) {
-      rb->SendBulkString(topk_item.item);
-      rb->SendLong(topk_item.count);
-    }
-  } else {
-    // Array of items only
-    rb->StartArray(result->size());
-    for (const auto& topk_item : *result) {
-      rb->SendBulkString(topk_item.item);
+  {
+    SinkReplyBuilder::ReplyScope scope(rb);
+    if (with_count) {
+      // Flat array: [item1, count1, item2, count2, ...]
+      rb->StartArray(result->size() * 2);
+      for (const auto& topk_item : *result) {
+        rb->SendBulkString(topk_item.item);
+        rb->SendLong(topk_item.count);
+      }
+    } else {
+      // Array of items only
+      rb->StartArray(result->size());
+      for (const auto& topk_item : *result) {
+        rb->SendBulkString(topk_item.item);
+      }
     }
   }
+
+  uint64_t ser_time = base::CycleClock::ToUsec(base::CycleClock::Now() - ser_start);
+  uint64_t total_time = base::CycleClock::ToUsec(base::CycleClock::Now() - cmd_start);
+
+  VLOG(1) << "TOPK.LIST[" << result->size() << " items, with_count=" << with_count << "]: "
+          << "parse=" << parse_time << "us "
+          << "shard=" << (shard_time - parse_time) << "us "
+          << "serialize=" << ser_time << "us "
+          << "total=" << total_time << "us";
 }
 
 // TOPK.INFO key
