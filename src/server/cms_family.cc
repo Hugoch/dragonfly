@@ -263,7 +263,7 @@ void CmdInfo(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-// Structure to hold CMS data collected from a shard
+// Structure to hold CMS data collected from a shard when merging
 struct CmsShardData {
   string_view key;      // Original key name
   uint32_t width;
@@ -275,6 +275,8 @@ struct CmsShardData {
       : key(k), width(w), depth(d), count(c), counters(data, data + size) {}
 };
 
+// Merge multiple CMS structures into a destination key
+// This needs to read from multiple shards via a multi-shard transaction
 void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser(args);
   string_view dest_key = parser.Next();
@@ -332,7 +334,7 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
   // Multi-shard implementation: read from all shards, merge in coordinator, write to dest
   Transaction* tx = cmd_cntx->tx();
 
-  // Phase 1: Read CMS data from all shards
+  // Read CMS data from all shards
   vector<OpResult<vector<CmsShardData>>> shard_results(shard_set->size(), OpStatus::SKIPPED);
 
   auto read_cb = [&](Transaction* t, EngineShard* shard) -> OpStatus {
@@ -349,9 +351,9 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
 
       OpResult src_res = db_slice.FindReadOnly(db_cntx, key, OBJ_CMS);
       if (!src_res) {
-        // Store error and continue - don't return error from callback
+        // Store error and continue
         shard_results[shard->shard_id()] = src_res.status();
-        return OpStatus::OK;  // Always return OK from callbacks
+        return OpStatus::OK;
       }
 
       const CMS* cms = src_res.value()->second.GetCMS();
@@ -366,9 +368,9 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  tx->Execute(read_cb, false);  // false = don't conclude yet
+  tx->Execute(read_cb, false);  // don't conclude yet
 
-  // Phase 2: Validate dimensions and collect all CMS data
+  // Validate dimensions and collect all CMS data
   vector<CmsShardData*> all_cms_data;
   uint32_t ref_width = 0, ref_depth = 0;
 
@@ -408,7 +410,7 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError(kCmsNotFound);
   }
 
-  // Phase 3: Write merged data to destination shard
+  // Now write merged data to destination shard
   ShardId dest_shard_id = Shard(dest_key, shard_set->size());
   OpStatus write_result = OpStatus::OK;
 
@@ -421,7 +423,7 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
     OpResult dest_res = db_slice.FindMutable(t->GetDbContext(), dest_key, OBJ_CMS);
     if (!dest_res) {
       write_result = dest_res.status();
-      return OpStatus::OK;  // Always return OK from callback
+      return OpStatus::OK;
     }
 
     CMS* dest_cms = dest_res->it->second.GetCMS();
@@ -429,7 +431,7 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
     // Validate destination dimensions
     if (ref_width != dest_cms->Width() || ref_depth != dest_cms->Depth()) {
       write_result = OpStatus::INVALID_VALUE;
-      return OpStatus::OK;  // Always return OK from callback
+      return OpStatus::OK;
     }
 
     // Merge each source into destination
@@ -443,14 +445,14 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
       size_t key_idx = key_to_index[cms_data->key];
       if (!dest_cms->MergeFrom(temp_cms, weights[key_idx])) {
         write_result = OpStatus::INVALID_VALUE;
-        return OpStatus::OK;  // Always return OK from callback
+        return OpStatus::OK;
       }
     }
 
     return OpStatus::OK;
   };
 
-  tx->Execute(write_cb, true);  // true = conclude transaction
+  tx->Execute(write_cb, true);  // conclude transaction
 
   if (write_result == OpStatus::KEY_NOTFOUND) {
     return rb->SendError(kCmsNotFound);

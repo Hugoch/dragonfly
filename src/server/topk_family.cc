@@ -86,9 +86,9 @@ OpResult<vector<optional<string>>> OpIncrBy(const OpArgs& op_args, string_view k
   for (const auto& [item, incr] : items) {
     auto expelled = topk->IncrBy(item, incr);
     if (expelled.empty()) {
-      result.push_back(nullopt);
+      result.emplace_back(nullopt);
     } else {
-      result.push_back(expelled[0]);
+      result.emplace_back(expelled[0]);
     }
   }
   uint64_t topk_time = base::CycleClock::ToUsec(base::CycleClock::Now() - topk_start);
@@ -274,7 +274,7 @@ void TopkFamily::IncrBy(CmdArgList args, CommandContext* cmd_cntx) {
     if (parser.HasError()) {
       return cmd_cntx->SendError(parser.TakeError().MakeReply());
     }
-    if (incr < 1 || incr > 100000) {
+    if (incr < 1 || incr > 100000) { // Redis limits increment to [1, 100000]
       return cmd_cntx->SendError("increment must be between 1 and 100000");
     }
     items.emplace_back(item, incr);

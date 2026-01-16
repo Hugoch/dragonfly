@@ -13,8 +13,6 @@
 namespace dfly {
 
 /// Count-Min Sketch implementation compatible with Redis CMS commands.
-/// This is a probabilistic data structure for frequency estimation that uses
-/// sublinear space. It may overestimate frequencies but never underestimates.
 class CMS {
  public:
   // Create a CMS with given width and depth dimensions.
@@ -30,10 +28,10 @@ class CMS {
 
   ~CMS() = default;
 
-  // Create a CMS from error and probability parameters (Redis INITBYPROB semantics).
+  // Create a CMS from error and probability parameters.
   // error: the acceptable overestimate error rate (0 < error < 1)
   // probability: the probability of exceeding the error rate (0 < probability < 1)
-  // Formulas: width = ceil(e / error), depth = ceil(ln(1 / probability))
+  // width = ceil(e / error), depth = ceil(ln(1 / probability))
   static CMS CreateByProb(double error, double probability, PMR_NS::memory_resource* mr = nullptr);
 
   // Increment the count for an item by the given value.
@@ -41,7 +39,7 @@ class CMS {
   int64_t IncrBy(std::string_view item, int64_t increment);
 
   // Query the estimated count for an item.
-  int64_t Query(std::string_view item) const;
+  [[nodiscard]] int64_t Query(std::string_view item) const;
 
   // Merge another CMS into this one with the given weight.
   // The other CMS must have the same dimensions.
@@ -49,28 +47,28 @@ class CMS {
   bool MergeFrom(const CMS& other, int64_t weight = 1);
 
   // Accessors for CMS properties
-  uint32_t Width() const {
+  [[nodiscard]] uint32_t Width() const {
     return width_;
   }
 
-  uint32_t Depth() const {
+  [[nodiscard]] uint32_t Depth() const {
     return depth_;
   }
 
-  // Total count of all increments (sum of all IncrBy calls)
-  int64_t Count() const {
+  // Total count of all increments
+  [[nodiscard]] int64_t Count() const {
     return count_;
   }
 
   // Memory usage in bytes
-  size_t MallocUsed() const;
+  [[nodiscard]] size_t MallocUsed() const;
 
   // For serialization - returns the raw counter data
-  size_t CounterBytes() const {
+  [[nodiscard]] size_t CounterBytes() const {
     return counters_.size() * sizeof(int64_t);
   }
 
-  const int64_t* Data() const {
+  [[nodiscard]] const int64_t* Data() const {
     return counters_.data();
   }
 
@@ -79,7 +77,7 @@ class CMS {
   void SetCounters(const int64_t* data, size_t count, int64_t total_count);
 
  private:
-  uint64_t Hash(std::string_view item, uint32_t row) const;
+  [[nodiscard]] uint64_t Hash(std::string_view item, uint32_t row) const;
 
   uint32_t width_;
   uint32_t depth_;

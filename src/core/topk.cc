@@ -14,7 +14,7 @@
 
 namespace dfly {
 
-TOPK::TOPK(uint32_t k, uint32_t width, uint32_t depth, double decay,
+TOPK::TOPK(const uint32_t k, const uint32_t width, const uint32_t depth, const double decay,
            PMR_NS::memory_resource* mr)
     : k_(k),
       width_(width),
@@ -30,8 +30,7 @@ TOPK::TOPK(uint32_t k, uint32_t width, uint32_t depth, double decay,
   DCHECK_LE(decay_, 1.0);
   min_heap_.reserve(k + 1);
 
-  // Initialize decay lookup table: pre-compute decay^i for i = 0 to 255
-  // This avoids expensive std::pow() calls during ShouldDecay()
+  // Pre-compute decay lookup table for i = 0 to 255 to avoid repeated std::pow() calls
   for (size_t i = 0; i < kDecayLookupSize; ++i) {
     decay_lookup_[i] = std::pow(decay_, static_cast<double>(i));
   }
@@ -72,12 +71,12 @@ double TOPK::ComputeDecayProbability(uint32_t count) const {
     return decay_lookup_[count];
   }
 
-  // For large counts, use extrapolation formula to avoid std::pow()
-  // decay^count ≈ (decay^255)^(count/255) × decay^(count%255)
+  // When decay is not in table range [0..N] use extrapolation:
+  // decay^count ≈ (decay^(N-1))^(count/(N-1)) × decay^(count%(N-1))
   uint32_t quotient = count / (kDecayLookupSize - 1);
   uint32_t remainder = count % (kDecayLookupSize - 1);
 
-  // Compute (decay^255)^quotient × decay^remainder
+  // Compute (decay^(N-1))^quotient × decay^remainder
   double base = decay_lookup_[kDecayLookupSize - 1];
   double result = std::pow(base, static_cast<double>(quotient)) * decay_lookup_[remainder];
 
@@ -93,7 +92,6 @@ bool TOPK::ShouldDecay(uint32_t current_count) const {
   thread_local std::mt19937 gen(std::random_device{}());
   thread_local std::uniform_real_distribution<double> dis(0.0, 1.0);
 
-  // Use lookup table instead of expensive std::pow()
   double prob = ComputeDecayProbability(current_count);
   return dis(gen) < prob;
 }
@@ -107,7 +105,7 @@ void TOPK::HeapifyUp(size_t index) {
       break;  // Heap property satisfied
     }
 
-    // Swap with parent - no index map updates for better cache performance
+    // Swap with parent
     std::swap(min_heap_[parent], min_heap_[index]);
 
     index = parent;
@@ -135,7 +133,7 @@ void TOPK::HeapifyDown(size_t index) {
       break;  // Heap property satisfied
     }
 
-    // Swap with smallest child - no index map updates for better cache performance
+    // Swap with smallest child
     std::swap(min_heap_[smallest], min_heap_[index]);
 
     index = smallest;
@@ -205,9 +203,9 @@ std::vector<std::optional<std::string>> TOPK::AddMultiple(
   for (const auto& item : items) {
     auto expelled = Add(item);
     if (expelled.empty()) {
-      result.push_back(std::nullopt);
+      result.emplace_back(std::nullopt);
     } else {
-      result.push_back(expelled[0]);
+      result.emplace_back(expelled[0]);
     }
   }
 
@@ -215,7 +213,7 @@ std::vector<std::optional<std::string>> TOPK::AddMultiple(
 }
 
 std::vector<std::string> TOPK::IncrBy(std::string_view item, uint32_t increment) {
-  if (increment < 1 || increment > 100000) {
+  if (increment < 1) {
     // Invalid increment, return empty
     return {};
   }
@@ -230,9 +228,9 @@ std::vector<std::optional<std::string>> TOPK::IncrByMultiple(
   for (const auto& [item, incr] : items) {
     auto expelled = IncrBy(item, incr);
     if (expelled.empty()) {
-      result.push_back(std::nullopt);
+      result.emplace_back(std::nullopt);
     } else {
-      result.push_back(expelled[0]);
+      result.emplace_back(expelled[0]);
     }
   }
 
@@ -349,13 +347,20 @@ size_t TOPK::MallocUsed() const {
   size_t size = 0;
 
   // Counter array
-  size += counters_.size() * sizeof(uint32_t);
+  size += counters_.capacity() * sizeof(uint32_t);
 
-  // Heap items (estimate)
-  size += min_heap_.size() * (sizeof(HeapItem) + 20);  // ~20 bytes avg string
+  // Heap items - calculate actual string sizes
+  size += min_heap_.capacity() * sizeof(HeapItem);
+  for (const auto& item : min_heap_) {
+    size += item.key.capacity();
+  }
 
-  // Hash map
-  size += item_to_hash_.size() * (sizeof(std::string) + sizeof(size_t) + 20);
+  // flat_hash_map overhead
+  size += item_to_hash_.bucket_count(); // Account for control bytes
+  size += item_to_hash_.bucket_count() * sizeof(std::pair<const std::string, size_t>); // Pair storage
+  for (const auto& [key, hash] : item_to_hash_) {
+    size += key.capacity();
+  }
 
   return size;
 }

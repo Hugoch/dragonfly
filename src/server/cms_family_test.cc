@@ -15,7 +15,7 @@ class CmsFamilyTest : public BaseFamilyTest {
 TEST_F(CmsFamilyTest, InitByDim) {
   auto resp = Run({"cms.initbydim", "cms1", "1000", "5"});
   EXPECT_EQ(resp, "OK");
-  EXPECT_EQ(Run({"type", "cms1"}), "TDCM----");
+  EXPECT_EQ(Run({"type", "cms1"}), "CMSk-TYPE");
 
   // Should fail on existing key
   resp = Run({"cms.initbydim", "cms1", "100", "5"});

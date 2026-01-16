@@ -1711,8 +1711,8 @@ constexpr std::pair<CompactObjType, std::string_view> kObjTypeToString[] =
         {OBJ_STRING, "string"sv},  {OBJ_LIST, "list"sv},    {OBJ_SET, "set"sv},
         {OBJ_ZSET, "zset"sv},      {OBJ_HASH, "hash"sv},    {OBJ_STREAM, "stream"sv},
         {OBJ_KEY, "key"sv},  // pseudo-type used for memory tracking
-        {OBJ_JSON, "ReJSON-RL"sv}, {OBJ_SBF, "MBbloom--"sv}, {OBJ_CMS, "TDCM----"sv},
-        {OBJ_TOPK, "TOPK----"sv}};
+        {OBJ_JSON, "ReJSON-RL"sv}, {OBJ_SBF, "MBbloom--"sv}, {OBJ_CMS, "CMSk-TYPE"sv},
+        {OBJ_TOPK, "TopK-TYPE"sv}};
 
 std::string_view ObjTypeToString(CompactObjType type) {
   for (auto& p : kObjTypeToString) {

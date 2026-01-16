@@ -14,7 +14,6 @@ namespace dfly {
 CMS::CMS(uint32_t width, uint32_t depth, PMR_NS::memory_resource* mr)
     : width_(width),
       depth_(depth),
-      count_(0),
       counters_(static_cast<size_t>(width) * depth, 0,
                 PMR_NS::polymorphic_allocator<int64_t>(mr)) {
 }
@@ -45,14 +44,14 @@ CMS& CMS::operator=(CMS&& other) noexcept {
 CMS CMS::CreateByProb(double error, double probability, PMR_NS::memory_resource* mr) {
   // width = ceil(e / error) where e is Euler's number
   // depth = ceil(ln(1 / probability))
-  uint32_t width = static_cast<uint32_t>(std::ceil(std::exp(1.0) / error));
-  uint32_t depth = static_cast<uint32_t>(std::ceil(std::log(1.0 / probability)));
+  auto width = static_cast<uint32_t>(std::ceil(std::exp(1.0) / error));
+  auto depth = static_cast<uint32_t>(std::ceil(std::log(1.0 / probability)));
 
   // Ensure minimum dimensions
   width = std::max(width, 1u);
   depth = std::max(depth, 1u);
 
-  return CMS(width, depth, mr);
+  return {width, depth, mr};
 }
 
 int64_t CMS::IncrBy(std::string_view item, int64_t increment) {
@@ -101,7 +100,7 @@ size_t CMS::MallocUsed() const {
 
 void CMS::SetCounters(const int64_t* data, size_t count, int64_t total_count) {
   if (count == counters_.size()) {
-    std::copy(data, data + count, counters_.begin());
+    std::copy_n(data, count, counters_.begin());
     count_ = total_count;
   }
 }
